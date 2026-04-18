@@ -7,7 +7,7 @@ from PyQt6.QtCore import Qt, QEvent
 from docx import Document
 
 
-# --- 新增：支持多选的下拉框组件 ---
+# --- 1. 核心修改：支持多选且点击稳定的下拉框组件 ---
 class MultiSelectComboBox(QComboBox):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -15,25 +15,54 @@ class MultiSelectComboBox(QComboBox):
         self.lineEdit().setReadOnly(True)
         self.lineEdit().setPlaceholderText("可多选...")
 
-        # 创建列表视图并关联复选逻辑
+        # 关键修改点 A：让输入框对鼠标点击透明，这样点击文字/空白处会直接由底层的 ComboBox 处理
+        self.lineEdit().setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+
         self.list_widget = QListWidget()
         self.setModel(self.list_widget.model())
         self.setView(self.list_widget)
 
-        # 拦截点击事件，防止点击 Item 时下拉框自动关闭
+        # 关键修改点 B：拦截视图视口事件，处理勾选逻辑
         self.view().viewport().installEventFilter(self)
         self.model().dataChanged.connect(self.update_text)
 
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+
     def eventFilter(self, widget, event):
+        # 处理列表内部点击勾选逻辑
         if widget == self.view().viewport() and event.type() == QEvent.Type.MouseButtonRelease:
             index = self.view().indexAt(event.pos())
             item = self.list_widget.item(index.row())
-            if item.checkState() == Qt.CheckState.Checked:
-                item.setCheckState(Qt.CheckState.Unchecked)
-            else:
-                item.setCheckState(Qt.CheckState.Checked)
+            if item:
+                item.setCheckState(
+                    Qt.CheckState.Unchecked if item.checkState() == Qt.CheckState.Checked else Qt.CheckState.Checked)
             return True
         return super().eventFilter(widget, event)
+
+    # 关键修改点 C：接管鼠标释放事件。
+    # 点击空白处和点击小三角现在都会触发这里，实现稳定的开关切换
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            if self.view().isVisible():
+                self.hidePopup()
+            else:
+                self.showPopup()
+        else:
+            super().mouseReleaseEvent(event)
+
+    # 关键修改点 D：拦截鼠标按下事件，防止系统默认逻辑导致“弹出后立即关闭”的闪退
+    def mousePressEvent(self, event):
+        pass
+
+        # 需求：禁用滚轮控制选项
+
+    def wheelEvent(self, e):
+        if not self.view().isVisible():
+            e.ignore()  # 未展开时，滚轮无效
+        else:
+            # 展开时，允许滚轮滚动内部列表内容
+            self.view().verticalScrollBar().wheelEvent(e)
 
     def addItems(self, texts):
         for text in texts:
@@ -50,10 +79,23 @@ class MultiSelectComboBox(QComboBox):
         return self.lineEdit().text()
 
 
+# --- 2. 普通单选框也禁用滚轮 ---
+class NoWheelComboBox(QComboBox):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+
+    def wheelEvent(self, e):
+        if not self.view().isVisible():
+            e.ignore()
+        else:
+            super().wheelEvent(e)
+
+
+# --- 3. 主界面程序 ---
 class MedicalApp(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("口腔种植病历生成器 v2.3 - 立体多选版")
+        self.setWindowTitle("口腔种植病历生成器 v2.3 - 交互优化版")
         self.setMinimumSize(950, 850)
         self.init_ui()
         self.apply_dark_style()
@@ -66,7 +108,6 @@ class MedicalApp(QMainWindow):
 
         main_bg = QWidget()
         scroll.setWidget(main_bg)
-
         global_layout = QVBoxLayout(main_bg)
         global_layout.setAlignment(Qt.AlignmentFlag.AlignHCenter)
 
@@ -78,7 +119,7 @@ class MedicalApp(QMainWindow):
         layout.setSpacing(20)
         layout.setContentsMargins(25, 25, 25, 25)
 
-        # --- 标题栏 ---
+        # 标题
         header = QVBoxLayout()
         title = QLabel("口腔种植病历模板生成系统")
         title.setObjectName("MainTitle")
@@ -88,7 +129,7 @@ class MedicalApp(QMainWindow):
         header.addWidget(subtitle)
         layout.addLayout(header)
 
-        # --- 第一部分：文件配置 ---
+        # 文件配置区
         file_section = QFrame()
         file_section.setObjectName("SectionCard")
         file_grid = QGridLayout(file_section)
@@ -109,7 +150,7 @@ class MedicalApp(QMainWindow):
         file_grid.addWidget(self.output_name, 1, 1, 1, 2)
         layout.addWidget(file_section)
 
-        # --- 第二部分：表单信息 ---
+        # 表单区
         form_section = QFrame()
         form_section.setObjectName("SectionCard")
         form_grid = QGridLayout(form_section)
@@ -118,46 +159,39 @@ class MedicalApp(QMainWindow):
 
         self.inputs = {}
 
-        # 1. 病情描述
+        # 填充各项控件
         self.add_form_item(form_grid, "1. 病情描述", "desc", "例如：牙缺失一年以上", 0, 0, 1, 2)
 
-        # 2. 植体品牌 (修改为多选)
         brands = ["卡瓦盛邦", "士卓曼(亲水)", "士卓曼(非亲水)", "韩国DIO", "Nobel", "Nobel cc", "Nobel pmc",
                   "Nobel pcc", "Nobel active"]
         self.add_multi_combo_item(form_grid, "2. 植体品牌 (多选)", "brand", brands, 1, 0)
 
-        # 4. 日期
         self.date_input = QLineEdit()
         self.date_input.setPlaceholderText("YYYY-MM-DD")
         self.date_input.textChanged.connect(self.format_date)
         self.add_custom_item(form_grid, "4. 种植日期", self.date_input, "date", 1, 1)
 
-        # 3. 牙位与型号
         self.add_form_item(form_grid, "3-1. 牙位", "tooth_pos", "如: 46", 2, 0)
         self.add_form_item(form_grid, "3-2. 植体型号", "tooth_model", "如: 4.3x10mm", 2, 1)
 
-        # 5. 颌位选择 (修改为多选)
         self.add_multi_combo_item(form_grid, "5. 颌位选择 (多选)", "jaw", ["上", "下"], 3, 0)
-        # 6. 手术类型 (修改为多选)
         self.add_multi_combo_item(form_grid, "6. 手术类型 (多选)", "op_type", ["种植", "上颌窦内提升", "上颌窦外提升"],
                                   3, 1)
 
-        # 7. 个数
         self.add_combo_item(form_grid, "7. 种植体个数", "count", [str(i) for i in range(1, 21)], 4, 0)
-        # 8. 冠桥类型 (修改为多选)
-        self.add_multi_combo_item(form_grid, "8. 冠桥类型 (多选)", "bridge", ["单冠", "连冠","上半口桥架","下半口桥架","全口桥架"], 4, 1)
+        self.add_multi_combo_item(form_grid, "8. 冠桥类型 (多选)", "bridge",
+                                  ["单冠", "连冠", "上半口桥架", "下半口桥架", "全口桥架"], 4, 1)
 
-        # 其他单选项
         self.add_combo_item(form_grid, "9_1. 高压 (mmHg)", "h_pressure", [str(i) for i in range(110, 121)], 5, 0)
         self.add_combo_item(form_grid, "9_2. 低压 (mmHg)", "l_pressure", [str(i) for i in range(70, 81)], 5, 1)
         self.add_combo_item(form_grid, "10. 心率 (次/分)", "rate", [str(i) for i in range(60, 101)], 6, 0)
 
-        self.s_time_input = QLineEdit()
+        self.s_time_input = QLineEdit();
         self.s_time_input.setPlaceholderText("HH:MM")
         self.s_time_input.textChanged.connect(lambda t: self.format_time(self.s_time_input, t))
         self.add_custom_item(form_grid, "11_1. 开始时间", self.s_time_input, "s_time", 6, 1)
 
-        self.e_time_input = QLineEdit()
+        self.e_time_input = QLineEdit();
         self.e_time_input.setPlaceholderText("HH:MM")
         self.e_time_input.textChanged.connect(lambda t: self.format_time(self.e_time_input, t))
         self.add_custom_item(form_grid, "11_2. 结束时间", self.e_time_input, "e_time", 7, 0)
@@ -167,17 +201,16 @@ class MedicalApp(QMainWindow):
 
         layout.addWidget(form_section)
 
-        # --- 按钮区 ---
+        # 按钮
         btn_container = QWidget()
         btn_layout = QHBoxLayout(btn_container)
         btn_exit = QPushButton("退出程序")
-        btn_exit.setFixedSize(140, 50)
+        btn_exit.setFixedSize(140, 50);
         btn_exit.setObjectName("ExitButton")
         btn_exit.clicked.connect(self.close)
 
         btn_generate = QPushButton("生成并导出 Word 文档")
-        btn_generate.setFixedHeight(50)
-        btn_generate.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        btn_generate.setFixedHeight(50);
         btn_generate.setObjectName("GenerateButton")
         btn_generate.clicked.connect(self.generate_word)
 
@@ -186,7 +219,7 @@ class MedicalApp(QMainWindow):
         btn_layout.addWidget(btn_generate)
         layout.addWidget(btn_container)
 
-    # --- 辅助函数 ---
+    # --- 辅助方法 ---
     def add_form_item(self, grid, label, key, placeholder, r, c, rs=1, cs=1):
         vbox = QVBoxLayout();
         vbox.setSpacing(8)
@@ -200,14 +233,13 @@ class MedicalApp(QMainWindow):
     def add_combo_item(self, grid, label, key, items, r, c, rs=1, cs=1):
         vbox = QVBoxLayout();
         vbox.setSpacing(8)
-        combo = QComboBox();
+        combo = NoWheelComboBox()
         combo.addItems(items)
         vbox.addWidget(QLabel(label));
         vbox.addWidget(combo)
         self.inputs[key] = combo
         grid.addLayout(vbox, r, c, rs, cs)
 
-    # 新增多选辅助函数
     def add_multi_combo_item(self, grid, label, key, items, r, c, rs=1, cs=1):
         vbox = QVBoxLayout();
         vbox.setSpacing(8)
@@ -251,9 +283,9 @@ class MedicalApp(QMainWindow):
             return
         try:
             doc = Document(path)
-            # 统一通过 currentText 获取（MultiSelectComboBox 也支持此方法）
             vals = {k: (v.currentText() if isinstance(v, QComboBox) else v.text()) for k, v in self.inputs.items()}
 
+            # 自动计算逻辑
             d1 = d2 = num2 = ""
             try:
                 base_dt = datetime.strptime(vals['date'], "%Y-%m-%d")
@@ -299,7 +331,7 @@ class MedicalApp(QMainWindow):
                 background-color: #1C1C26; border: 1px solid #12121A; border-radius: 8px; 
                 padding: 10px; color: #F0F0F0; font-size: 14px;
             }
-            QListWidget::item { height: 30px; }
+            QListWidget::item { height: 35px; padding-left: 10px; }
             QListWidget::item:hover { background-color: #3498DB; }
             QPushButton { 
                 background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #4A4A5A, stop:1 #2D2D3D);
