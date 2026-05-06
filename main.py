@@ -9,6 +9,7 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QH
                              QScrollArea, QListWidget, QListWidgetItem, QInputDialog)
 from PyQt6.QtCore import Qt, QEvent, QSize, QPropertyAnimation, QEasingCurve
 from docx import Document
+from dateutil.relativedelta import relativedelta
 
 # --- 0. 安全与配置逻辑 ---
 CONFIG_FILE = "app_settings.bin"
@@ -463,30 +464,97 @@ class MedicalApp(QMainWindow):
 
     def generate_word(self):
         p = self.template_path.text()
-        if not p: QMessageBox.warning(self, "错误", "请先选择模板！"); return
+        if not p:
+            QMessageBox.warning(self, "错误", "请先选择模板！")
+            return
+
         try:
             doc = Document(p)
+            # 1. 提取界面所有输入值
             vals = {k: (v.currentText() if isinstance(v, QComboBox) else v.text()) for k, v in self.inputs.items()}
-            rmap = {"{{description}}": vals['desc'], "{{brand}}": vals['brand'], "{{y_position}}": vals['tooth_pos'],
-                    "{{model}}": vals['tooth_model'], "{{date}}": vals['date'], "{{e_position}}": vals['jaw'],
-                    "{{surgery}}": vals['op_type'], "{{number}}": vals['count'], "{{Crown}}": vals['bridge'],
-                    "{{h_pressure}}": vals['h_pressure'], "{{l_pressure}}": vals['l_pressure'],
-                    "{{rate}}": vals['rate'],
-                    "{{s_time}}": vals['s_time'], "{{o_time}}": vals['e_time'], "{{thickness}}": vals['thickness'],
-                    "{{bone}}": vals['bone']}
+
+            # --- 2. 自动化计算逻辑 ---
+
+            # A. 数量翻倍逻辑
+            try:
+                count_val = int(vals.get('count', 0))
+            except (ValueError, TypeError):
+                count_val = 0
+
+            # B. 日期偏移逻辑 (date1: +5个月, date2: +5个月8天)
+            date_str = vals.get('date', '').strip()
+            date1_result = ""
+            date2_result = ""
+
+            if date_str:
+                try:
+                    # 将界面输入的 YYYY-MM-DD 转为日期对象
+                    base_date = datetime.strptime(date_str, "%Y-%m-%d")
+                    # 计算 date1: +5个月
+                    d1 = base_date + relativedelta(months=5)
+                    date1_result = d1.strftime("%Y-%m-%d")
+                    # 计算 date2: +5个月 + 8天
+                    d2 = base_date + relativedelta(months=5, days=8)
+                    date2_result = d2.strftime("%Y-%m-%d")
+                except Exception:
+                    # 如果日期格式不对，则不填充或保持原样，防止崩溃
+                    date1_result = "日期格式错误"
+                    date2_result = "日期格式错误"
+
+            # 3. 构建完整的映射表 (将占位符与计算结果绑定)
+            rmap = {
+                "{{description}}": vals.get('desc', ''),
+                "{{brand}}": vals.get('brand', ''),
+                "{{y_position}}": vals.get('tooth_pos', ''),
+                "{{model}}": vals.get('tooth_model', ''),
+                "{{date}}": vals.get('date', ''),
+
+                # 自动计算的字段
+                "{{date1}}": date1_result,
+                "{{date2}}": date2_result,
+                "{{number2}}": str(count_val * 2),
+
+                "{{Crown}}": vals.get('bridge', ''),
+                "{{e_position}}": vals.get('jaw', ''),
+                "{{surgery}}": vals.get('op_type', ''),
+                "{{number}}": vals.get('count', ''),
+                "{{h_pressure}}": vals.get('h_pressure', ''),
+                "{{l_pressure}}": vals.get('l_pressure', ''),
+                "{{rate}}": vals.get('rate', ''),
+                "{{s_time}}": vals.get('s_time', ''),
+                "{{o_time}}": vals.get('e_time', ''),
+                "{{thickness}}": vals.get('thickness', ''),
+                "{{bone}}": vals.get('bone', '')
+            }
+
+            # 4. 执行【保留格式】的替换逻辑 (Run 级别替换)
+            # 处理正文段落
             for pa in doc.paragraphs:
                 for k, v in rmap.items():
-                    if k in pa.text: pa.text = pa.text.replace(k, v)
+                    if k in pa.text:
+                        for run in pa.runs:
+                            if k in run.text:
+                                run.text = run.text.replace(k, str(v))
+
+            # 处理表格内容
             for table in doc.tables:
                 for row in table.rows:
                     for cell in row.cells:
-                        for k, v in rmap.items():
-                            if k in cell.text: cell.text = cell.text.replace(k, v)
-            sp, _ = QFileDialog.getSaveFileName(self, "保存", self.output_name.text(), "Word Files (*.docx)")
-            if sp: doc.save(sp); QMessageBox.information(self, "成功", "已保存")
-        except Exception as e:
-            QMessageBox.critical(self, "错误", str(e))
+                        for pa in cell.paragraphs:
+                            for k, v in rmap.items():
+                                if k in pa.text:
+                                    for run in pa.runs:
+                                        if k in run.text:
+                                            run.text = run.text.replace(k, str(v))
 
+            # 5. 保存文件
+            sp, _ = QFileDialog.getSaveFileName(self, "保存文档", self.output_name.text(), "Word Files (*.docx)")
+            if sp:
+                doc.save(sp)
+                QMessageBox.information(self, "成功", f"病历已成功生成并保存至：\n{sp}")
+
+        except Exception as e:
+            QMessageBox.critical(self, "错误", f"生成失败，原因：\n{str(e)}")
     def apply_dark_style(self):
         self.setStyleSheet("""
             QMainWindow, QWidget { background-color: #1A1A21; font-family: "Segoe UI", "Microsoft YaHei UI"; }
